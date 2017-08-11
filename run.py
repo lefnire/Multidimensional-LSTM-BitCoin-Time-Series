@@ -1,6 +1,7 @@
-import time
+import os
 import time
 import threading
+import argparse
 import lstm, etl, json
 import numpy as np
 import pandas as pd
@@ -9,6 +10,13 @@ import matplotlib.pyplot as plt
 
 configs = json.loads(open('configs.json').read())
 tstart = time.time()
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--clean-data', help='Should create & save clean dataset? (~7 minutes)', action='store_true')
+parser.add_argument('--fit-model', help='Should train the RNN? (~10 minutes)', action='store_true')
+args = vars(parser.parse_args())
+should_create_clean_data = args['clean_data'] or not os.path.isfile(configs['data']['filename_clean'])
+should_fit_model = args['fit_model'] or not configs['model']['filename_model']
 
 
 def plot_results(predicted_data, true_data):
@@ -57,7 +65,7 @@ def generator_strip_xy(data_gen, true_values):
 
 def fit_model_threaded(model, data_gen_train, steps_per_epoch, configs):
     """thread worker for model fitting - so it doesn't freeze on jupyter notebook"""
-    model = lstm.build_network([ncols, 150, 150, 1])
+    # model = lstm.build_network([ncols, 150, 150, 1])
     model.fit_generator(
         data_gen_train,
         steps_per_epoch=steps_per_epoch,
@@ -69,16 +77,17 @@ def fit_model_threaded(model, data_gen_train, steps_per_epoch, configs):
 
 
 dl = etl.ETL()
-dl.create_clean_datafile(
-    filename_in=configs['data']['filename'],
-    filename_out=configs['data']['filename_clean'],
-    batch_size=configs['data']['batch_size'],
-    x_window_size=configs['data']['x_window_size'],
-    y_window_size=configs['data']['y_window_size'],
-    y_col=configs['data']['y_predict_column'],
-    filter_cols=configs['data']['filter_columns'],
-    normalise=True
-)
+if should_create_clean_data:
+    dl.create_clean_datafile(
+        filename_in=configs['data']['filename'],
+        filename_out=configs['data']['filename_clean'],
+        batch_size=configs['data']['batch_size'],
+        x_window_size=configs['data']['x_window_size'],
+        y_window_size=configs['data']['y_window_size'],
+        y_col=configs['data']['y_predict_column'],
+        filter_cols=configs['data']['filter_columns'],
+        normalise=True
+    )
 
 print('> Generating clean data from:', configs['data']['filename_clean'], 'with batch_size:',
       configs['data']['batch_size'])
@@ -96,9 +105,14 @@ ntrain = int(configs['data']['train_test_split'] * nrows)
 steps_per_epoch = int((ntrain / configs['model']['epochs']) / configs['data']['batch_size'])
 print('> Clean data has', nrows, 'data rows. Training on', ntrain, 'rows with', steps_per_epoch, 'steps-per-epoch')
 
-model = lstm.build_network([ncols, 150, 150, 1])
-t = threading.Thread(target=fit_model_threaded, args=[model, data_gen_train, steps_per_epoch, configs])
-t.start()
+if should_fit_model:
+    model = lstm.build_network([ncols, 150, 150, 1])
+    # FIXME issues with threading, see https://github.com/jaungiers/Multidimensional-LSTM-BitCoin-Time-Series/issues/1
+    # t = threading.Thread(target=fit_model_threaded, args=[model, data_gen_train, steps_per_epoch, configs])
+    # t.start()
+    fit_model_threaded(model, data_gen_train, steps_per_epoch, configs)
+else:
+    model = lstm.load_network(configs['model']['filename_model'])
 
 data_gen_test = dl.generate_clean_data(
     configs['data']['filename_clean'],
