@@ -16,6 +16,8 @@ warnings.filterwarnings("ignore")  # Hide messy Numpy warnings
 def build_network(layers):
     model = Sequential()
 
+    # TODO in the morning try more neurons/layers?
+    # also changed second => minute in test.py, see if > 25mb
     model.add(LSTM(
         input_dim=layers[0],
         output_dim=layers[1],

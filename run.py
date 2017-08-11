@@ -1,31 +1,19 @@
-import os
-import time
-import threading
-import argparse
-import lstm, etl, json
+import os, time, threading, json, h5py, argparse, itertools
 import numpy as np
 import pandas as pd
-import h5py
-import matplotlib.pyplot as plt
+import lstm, etl, plotting
 
 configs = json.loads(open('configs.json').read())
 tstart = time.time()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--clean-data', help='Should create & save clean dataset? (~7 minutes)', action='store_true')
-parser.add_argument('--fit-model', help='Should train the RNN? (~10 minutes)', action='store_true')
+parser.add_argument('--train', help='Should train the RNN? (~10 minutes)', action='store_true')
+parser.add_argument('--multi-window', help='Display prediction over a larger window?', action='store_true')
 args = vars(parser.parse_args())
 should_create_clean_data = args['clean_data'] or not os.path.isfile(configs['data']['filename_clean'])
-should_fit_model = args['fit_model'] or not configs['model']['filename_model']
-
-
-def plot_results(predicted_data, true_data):
-    fig = plt.figure(figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k')
-    ax = fig.add_subplot(111)
-    ax.plot(true_data, label='True Data')
-    plt.plot(predicted_data, label='Prediction')
-    plt.legend()
-    plt.show()
+should_train = args['train'] or not configs['model']['filename_model']
+multi_window = args['multi_window']
 
 
 def predict_sequences_multiple(model, data, window_size, prediction_len):
@@ -41,24 +29,12 @@ def predict_sequences_multiple(model, data, window_size, prediction_len):
         prediction_seqs.append(predicted)
     return prediction_seqs
 
-
-def plot_results_multiple(predicted_data, true_data, prediction_len):
-    fig = plt.figure(figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k')
-    ax = fig.add_subplot(111)
-    ax.plot(true_data, label='True Data')
-    # Pad the list of predictions to shift it in the graph to it's correct start
-    for i, data in enumerate(predicted_data):
-        padding = [None for p in range(i * prediction_len)]
-        plt.plot(padding + data, label='Prediction')
-        plt.legend()
-    plt.show()
-
-
 true_values = []
-
+all_predictions = []
+holdings, wallet = 100, 100
 
 def generator_strip_xy(data_gen, true_values):
-    for x, y in data_gen_test:
+    for x, y in data_gen:
         true_values += list(y)
         yield x
 
@@ -77,80 +53,135 @@ def fit_model_threaded(model, data_gen_train, steps_per_epoch, configs):
 
 
 dl = etl.ETL()
-if should_create_clean_data:
-    dl.create_clean_datafile(
-        filename_in=configs['data']['filename'],
-        filename_out=configs['data']['filename_clean'],
-        batch_size=configs['data']['batch_size'],
-        x_window_size=configs['data']['x_window_size'],
-        y_window_size=configs['data']['y_window_size'],
-        y_col=configs['data']['y_predict_column'],
-        filter_cols=configs['data']['filter_columns'],
-        normalise=True
+
+if should_train:
+    if should_create_clean_data:
+        dl.create_clean_datafile(
+            filename_in=configs['data']['filename'],
+            filename_out=configs['data']['filename_clean'],
+            batch_size=configs['data']['batch_size'],
+            x_window_size=configs['data']['x_window_size'],
+            y_window_size=configs['data']['y_window_size'],
+            y_col=configs['data']['y_predict_column'],
+            filter_cols=configs['data']['filter_columns'],
+            normalise=True
+        )
+
+    print('> Generating clean data from:', configs['data']['filename_clean'], 'with batch_size:',
+          configs['data']['batch_size'])
+
+    data_gen_train = dl.generate_clean_data(
+        configs['data']['filename_clean'],
+        batch_size=configs['data']['batch_size']
     )
 
-print('> Generating clean data from:', configs['data']['filename_clean'], 'with batch_size:',
-      configs['data']['batch_size'])
+    with h5py.File(configs['data']['filename_clean'], 'r') as hf:
+        nrows = hf['x'].shape[0]
+        ncols = hf['x'].shape[2]
 
-data_gen_train = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=configs['data']['batch_size']
-)
+    ntrain = int(configs['data']['train_test_split'] * nrows)
+    steps_per_epoch = int((ntrain / configs['model']['epochs']) / configs['data']['batch_size'])
+    print('> Clean data has', nrows, 'data rows. Training on', ntrain, 'rows with', steps_per_epoch, 'steps-per-epoch')
 
-with h5py.File(configs['data']['filename_clean'], 'r') as hf:
-    nrows = hf['x'].shape[0]
-    ncols = hf['x'].shape[2]
-
-ntrain = int(configs['data']['train_test_split'] * nrows)
-steps_per_epoch = int((ntrain / configs['model']['epochs']) / configs['data']['batch_size'])
-print('> Clean data has', nrows, 'data rows. Training on', ntrain, 'rows with', steps_per_epoch, 'steps-per-epoch')
-
-if should_fit_model:
     model = lstm.build_network([ncols, 150, 150, 1])
     # FIXME issues with threading, see https://github.com/jaungiers/Multidimensional-LSTM-BitCoin-Time-Series/issues/1
     # t = threading.Thread(target=fit_model_threaded, args=[model, data_gen_train, steps_per_epoch, configs])
     # t.start()
     fit_model_threaded(model, data_gen_train, steps_per_epoch, configs)
+
+    data_gen_test = dl.generate_clean_data(
+        configs['data']['filename_clean'],
+        batch_size=configs['data']['batch_size'],
+        start_index=ntrain
+    )
+
+    ntest = nrows - ntrain
+    steps_test = int(ntest / configs['data']['batch_size'])
+    print('> Testing model on', ntest, 'data rows with', steps_test, 'steps')
+
+    predictions = model.predict_generator(
+        generator_strip_xy(data_gen_test, true_values),
+        steps=steps_test
+    )
+
+    # Save our predictions
+    with h5py.File(configs['model']['filename_predictions'], 'w') as hf:
+        dset_p = hf.create_dataset('predictions', data=predictions)
+        dset_y = hf.create_dataset('true_values', data=true_values)
+
+
+    # Running talley of our experiment (how much we'll make)
+    holdings, wallet = 100, 100
+    for x, y in zip(predictions, true_values):
+        x = float(x)
+        if x < 0:
+            wallet += holdings
+            holdings = 0
+        elif x > 0:
+            holdings += wallet
+            wallet = 0
+        holdings += holdings*(.1*y)
+    print('holdings=${} wallet=${}'.format(holdings, wallet))
+
+    plotting.plot_results(predictions[-800:], true_values[-800:], block=True)
+
 else:
-    model = lstm.load_network(configs['model']['filename_model'])
+    true_values = [0] * 50
+    all_predictions = [0] * 50
+    while True:
+        dl.fetch_market_and_save()
+        print('> Generating clean data from:', configs['data']['filename_clean'], 'with batch_size:',
+              configs['data']['batch_size'])
 
-data_gen_test = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=configs['data']['batch_size'],
-    start_index=ntrain
-)
+        data_gen_test = dl.data_tail(batch_size=configs['data']['batch_size'],
+            x_window_size=configs['data']['x_window_size'], y_window_size=configs['data']['y_window_size'],
+            y_col=configs['data']['y_predict_column'])
 
-ntest = nrows - ntrain
-steps_test = int(ntest / configs['data']['batch_size'])
-print('> Testing model on', ntest, 'data rows with', steps_test, 'steps')
+        model = lstm.load_network(configs['model']['filename_model'])
 
-predictions = model.predict_generator(
-    generator_strip_xy(data_gen_test, true_values),
-    steps=steps_test
-)
+        # ntest = dl.nrows
+        # # steps_test = int(ntest / configs['data']['batch_size'])
+        # steps_test = int(ntest / batch_size)
+        # # steps_test = 98  # FIXME what's going on here? ntest / 98 = 110, this is max num allowed else StopIteration error
+        # print('> Testing model on', ntest, 'data rows with', steps_test, 'steps')
 
-# Save our predictions
-with h5py.File(configs['model']['filename_predictions'], 'w') as hf:
-    dset_p = hf.create_dataset('predictions', data=predictions)
-    dset_y = hf.create_dataset('true_values', data=true_values)
+        x, y = data_gen_test
+        true_values.pop(0);true_values.append(y)
+        predictions = model.predict_on_batch(x)
+        all_predictions.pop(0);all_predictions.append(predictions[0])
 
-plot_results(predictions[:800], true_values[:800])
+        # Running talley of our experiment (how much we'll make)
+        x = float(all_predictions[-1])
+        if x < 0:
+            wallet += holdings
+            holdings = 0
+        elif x > 0:
+            holdings += wallet
+            wallet = 0
+        holdings += holdings * (.1 * y)
+        print('holdings=${} wallet=${}'.format(holdings, wallet))
 
-# Reload the data-generator
-data_gen_test = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=800,
-    start_index=ntrain
-)
-data_x, true_values = next(data_gen_test)
-window_size = 50  # numer of steps to predict into the future
+        print('prediction:', all_predictions[-1], 'true:', true_values[-1])
+        plotting.plot_results(all_predictions, true_values)
 
-# We are going to cheat a bit here and just take the next 400 steps from the testing generator and predict that data in its whole
-predictions_multiple = predict_sequences_multiple(
-    model,
-    data_x,
-    data_x[0].shape[0],
-    window_size
-)
 
-plot_results_multiple(predictions_multiple, true_values, window_size)
+if multi_window:
+    # Reload the data-generator
+    data_gen_test = dl.generate_clean_data(
+        configs['data']['filename_clean'],
+        batch_size=800,
+        start_index=ntrain
+    )
+    data_x, true_values = next(data_gen_test)
+    window_size = 50  # numer of steps to predict into the future
+
+    # We are going to cheat a bit here and just take the next 400 steps from the testing generator and predict that
+    # data in its whole
+    predictions_multiple = predict_sequences_multiple(
+        model,
+        data_x,
+        data_x[0].shape[0],
+        window_size
+    )
+
+    plotting.plot_results_multiple(predictions_multiple, true_values, window_size)

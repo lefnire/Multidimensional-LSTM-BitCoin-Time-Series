@@ -1,18 +1,13 @@
 {
     "data": {
-        "filename": "data/bitcoin.csv",
+        "filename": "../data/full.csv",
         "filename_clean": "data/clean_data.h5",
-        "filter_columns": [
-            "Open",
-            "Close",
-            "Volume_(BTC)",
-            "Volume_(Currency)"
-        ],
+        "filter_columns": [],
         "batch_size": 100,
         "train_test_split": 0.8,
         "x_window_size": 150,
         "y_window_size": 1,
-        "y_predict_column": "Close"
+        "y_predict_column": "c_change_percent"
     },
     "model": {
         "epochs": 2,
