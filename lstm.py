@@ -1,23 +1,16 @@
-import os
-import time
-import json
-import warnings
-import numpy as np
-from numpy import newaxis
+import os, time, warnings
 from keras.layers.core import Dense, Activation, Dropout
 from keras.layers.recurrent import LSTM
 from keras.models import Sequential
 from keras.models import load_model
+from lstm_btc import config
 
-configs = json.loads(open(os.path.join(os.path.dirname(__file__), 'configs.json')).read())
 warnings.filterwarnings("ignore")  # Hide messy Numpy warnings
 
 
 def build_network(layers):
     model = Sequential()
 
-    # TODO in the morning try more neurons/layers?
-    # also changed second => minute in test.py, see if > 25mb
     model.add(LSTM(
         input_dim=layers[0],
         output_dim=layers[1],
@@ -35,15 +28,16 @@ def build_network(layers):
 
     start = time.time()
     model.compile(
-        loss=configs['model']['loss_function'],
-        optimizer=configs['model']['optimiser_function'])
+        loss=config.model.loss_function,
+        optimizer=config.model.optimiser_function)
 
     print("> Compilation Time : ", time.time() - start)
     return model
 
 
-def load_network(filename):
-    # Load the h5 saved model and weights
+def load_network():
+    """Load the h5 saved model and weights"""
+    filename = config.model.filename_model
     if (os.path.isfile(filename)):
         return load_model(filename)
     else:

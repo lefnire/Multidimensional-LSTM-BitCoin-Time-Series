@@ -1,6 +1,6 @@
 {
     "data": {
-        "filename": "../data/full.csv",
+        "db_in": "postgres://lefnire:lefnire@localhost:5432/coins",
         "filename_clean": "data/clean_data.h5",
         "filter_columns": [],
         "batch_size": 100,
@@ -15,5 +15,10 @@
         "optimiser_function": "Nadam",
         "filename_model": "data/model_saved.h5",
         "filename_predictions": "data/model_predictions.h5"
+    },
+    "flags": {
+        "create_clean_data": false,
+        "train": false,
+        "multi_window": false
     }
 }

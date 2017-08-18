@@ -1,22 +1,16 @@
-import h5py, requests, json
+import h5py, requests, time
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-from sqlalchemy import create_engine
-
-engine = create_engine('postgres://lefnire:lefnire@localhost:5432/coins') #, echo=True
-conn = engine.connect()
+from lstm_btc import config, conn
 
 
 class ETL:
     """Extract Transform Load class for all data operations pre model inputs. Data is read in generative way to allow
     for large datafiles and low memory utilisation"""
 
-    def __init__(self):
-        self.nrows = 0
-        self.ncols = 0
-
-    def generate_clean_data(self, filename, batch_size=1000, start_index=0):
+    def generate_clean_data(self, filename=config.data.filename_clean, batch_size=config.data.batch_size,
+                            start_index=0):
         with h5py.File(filename, 'r') as hf:
             i = start_index
             while True:
@@ -25,23 +19,28 @@ class ETL:
                 i += batch_size
                 yield (data_x, data_y)
 
-    def create_clean_datafile(self, filename_in, filename_out, batch_size=1000, x_window_size=100, y_window_size=1,
-                              y_col=0, filter_cols=None, normalise=True):
+    def generator_strip_xy(self, data_gen, true_values):
+        for x, y in data_gen:
+            true_values += list(y)
+            yield x
+
+    def create_clean_datafile(self, batch_size=config.data.batch_size, x_window_size=config.data.x_window_size,
+                              y_window_size=config.data.y_window_size,
+                              filter_cols=config.data.filter_columns, normalise=True):
         """Incrementally save a datafile of clean data ready for loading straight into model"""
         print('> Creating x & y data files...')
 
         data_gen = self.clean_data(
-            filename_in,
             batch_size=batch_size,
             x_window_size=x_window_size,
             y_window_size=y_window_size,
-            y_col=y_col,
+            y_col=config.data.y_predict_column,
             filter_cols=filter_cols,
             normalise=normalise
         )
 
         i = 0
-        with h5py.File(filename_out, 'w') as hf:
+        with h5py.File(config.data.filename_clean, 'w') as hf:
             x1, y1 = next(data_gen)
             # Initialise hdf5 x, y datasets with first chunk of data
             rcount_x = x1.shape[0]
@@ -62,9 +61,9 @@ class ETL:
                 rcount_y += y_batch.shape[0]
                 i += 1
 
-        print('> Clean datasets created in file `' + filename_out + '.h5`')
+        print('> Clean datasets created in file `' + config.data.filename_clean + '.h5`')
 
-    def clean_data(self, filepath, batch_size, x_window_size, y_window_size, y_col, filter_cols, normalise):
+    def clean_data(self, batch_size, x_window_size, y_window_size, y_col, filter_cols, normalise):
         """Cleans and Normalises the data in batches `batch_size` at a time"""
         data = self.db_to_dataframe()
 
@@ -110,16 +109,14 @@ class ETL:
                 yield (x_np_arr, y_np_arr)
 
 
-    def data_tail(self, batch_size, x_window_size, y_window_size, y_col, normalise=True):
-        """Cleans and Normalises the data in batches `batch_size` at a time"""
+    def data_tail(self, x_window_size=config.data.x_window_size,
+                  y_window_size=config.data.y_window_size, normalise=True):
+        """Returns one batch worth of data (one x-window & y-window)"""
         data = self.db_to_dataframe(tail=True)
         data = data[-(x_window_size + y_window_size):]  # last batch
 
         # Convert y-predict column name to numerical index
-        y_col = list(data.columns).index(y_col)
-
-        x_data = []
-        y_data = []
+        y_col = list(data.columns).index(config.data.y_predict_column)
 
         x_window_data = data[:x_window_size]
         y_window_data = data[x_window_size:]
@@ -130,13 +127,11 @@ class ETL:
 
         # Average of the desired predicter y column
         y_average = np.average(y_window_data.values[:, y_col])
-        x_data.append(x_window_data.values)
-        y_data.append(y_average)
 
         # Convert from list to 3 dimensional numpy array [windows, window_val, val_dimension]
-        x_np_arr = np.array(x_data)
-        y_np_arr = np.array(y_data)
-        return (x_np_arr, y_np_arr)
+        x_data = np.array([x_window_data.values])
+        y_data = np.array([y_average])
+        return (x_data, y_data)
 
     def zero_base_standardise(self, data, abs_base=pd.DataFrame()):
         """Standardise dataframe to be zero based percentage returns from i=0"""
@@ -242,3 +237,22 @@ class ETL:
     @staticmethod
     def _clean_tablename(tablename):
         return tablename.replace(':', '_').replace('-', '_')
+
+    @staticmethod
+    def gdax_ct():
+        return conn.execute("select count(*) from gdax_btcusd").fetchone().count
+
+    def ensure_data(self):
+        """Ensure enough data is in the database to work with"""
+        try:
+            assert self.gdax_ct() > 1000
+        except Exception:
+            print('> Missing or not enough data, collecting now from cryptowatch...')
+            self.fetch_market_and_save()  # ensure db structure
+            i = 0
+            while True:
+                time.sleep(1)
+                self.fetch_market_and_save()
+                i += 1
+                if i % 100 == 0 and ETL.gdax_ct() > 1000:
+                    break

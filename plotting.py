@@ -1,5 +1,3 @@
-import time, pdb
-import numpy as np
 import matplotlib.pyplot as plt
 from collections import namedtuple
 
@@ -25,34 +23,6 @@ def plot_results(predicted_data, true_data, block=False):
         plt.legend()
         plt.show(block=block)
         existing = Existing(li_true=li_true, li_pred=li_pred, fig=fig)
-
-
-def realtime_plot(): # TODO
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-
-    # some X and Y data
-    x = np.arange(10000)
-    y = np.random.randn(10000)
-
-    li, = ax.plot(x, y)
-
-    # draw and show it
-    ax.relim()
-    ax.autoscale_view(True, True, True)
-    fig.canvas.draw()
-    plt.show(block=False)
-
-    # loop to update the data
-    while True:
-        try:
-            y[:-10] = y[10:]
-            y[-10:] = np.random.randn(10)
-            li.set_ydata(y) # set the new data
-            fig.canvas.draw()
-            time.sleep(0.01)
-        except KeyboardInterrupt:
-            break
 
 
 def plot_results_multiple(predicted_data, true_data, prediction_len):
