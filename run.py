@@ -1,4 +1,4 @@
-import os, time, h5py
+import os, time, h5py, sys
 import gdax
 import numpy as np
 from lstm_btc import lstm, etl, plotting, config
@@ -7,12 +7,13 @@ tstart = time.time()
 dl = etl.ETL()
 true_values = []
 all_predictions = []
-holdings, wallet = 100, 100
+holdings, wallet, dodged = 1000, 1000, 0
 
 
 def percent_change(new, old):
-    if old == 0: return .0001
+    if old == 0: return .000000001
     return (new - old) / old
+
 
 def predict_sequences_multiple(model, data, window_size, prediction_len):
     # Predict sequence of 50 steps before shifting prediction run forward by 50 steps
@@ -28,37 +29,42 @@ def predict_sequences_multiple(model, data, window_size, prediction_len):
     return prediction_seqs
 
 
-def buy_sell(preds, trues, tail=False, dry_run=True):
+def buy_sell(preds, trues, live=False):
     """Running talley of our experiment (how much we'll make)"""
-    global wallet, holdings
+    global wallet, holdings, dodged
+    prev = ()
     for pred, true in zip(preds, trues):
-        if prev == None:
-            prev = pred
-            continue
-        # Just to be clear - this is the anticipated percent change of the change_percent, rather than just change_percent
-        # directly. This is because change_percent is normalized in the data processing, so it's not what it seems
-        perc_change_of_perc_change = percent_change(pred, prev)
-        if perc_change_of_perc_change > .2:
-            wallet += holdings
-            holdings = 0
-        elif perc_change_of_perc_change < -.2:
+        if not prev:
+            prev = (pred, true); continue
+        p_change, t_change = percent_change(pred, prev[0]), percent_change(true, prev[1])
+        msg = 'Prediction={} ({}%); True={} ({}%) - '.format(pred, p_change, true, t_change)
+        if p_change >= .001:
+            msg = "BUYING! " + msg
             holdings += wallet
             wallet = 0
-            if not dry_run:
-                # Buy 0.01 BTC @ 100 USD
-                print("BUYING!")
-                # auth_client.buy(price='0.01',  # USD
-                #                 # size='0.01', #BTC
-                #                 product_id='BTC-USD')
-        holdings += holdings*(.1*true)
-        prev = pred
-    print('holdings=${} wallet=${}'.format(holdings, wallet))
+            if live:
+                pass
+                # auth_client.sell
+        elif p_change <= -.001:
+            msg = "SELLING! " + msg
+            wallet += holdings
+            dodged = dodged + holdings * t_change
+            holdings = 0
+            if live:
+                pass
+                # auth_client.buy(price='0.01',, size='0.01', product_id='BTC-USD') # USD, BTC, product
+        if live: print(msg)
+        holdings += holdings * t_change
+    print('Holdings=${} Wallet=${} Dodged=${}'.format(holdings, wallet, dodged))
+    if holdings + wallet < 0 and live:
+        raise Exception("You died.")
+
 
 
 if config.flags.create_clean_data or not os.path.isfile(config.data.filename_clean):
     print('> Generating clean data from:', config.data.filename_clean, 'with batch_size:',
           config.data.batch_size)
-    dl.create_clean_datafile(normalize=False)
+    dl.create_clean_datafile()
 
 if config.flags.train or not os.path.isfile(config.model.filename_model):
     data_gen_train = dl.generate_clean_data()
@@ -99,6 +105,28 @@ if config.flags.train or not os.path.isfile(config.model.filename_model):
     buy_sell(predictions, true_values)
     plotting.plot_results(predictions, true_values, block=True)
 
+    # Show multi-window
+    sys.exit(0)
+
+    # Reload the data-generator
+    data_gen_test = dl.generate_clean_data(
+        batch_size=800,
+        start_index=ntrain
+    )
+    data_x, true_values = next(data_gen_test)
+    window_size = 50  # numer of steps to predict into the future
+
+    # We are going to cheat a bit here and just take the next 400 steps from the testing generator and predict that
+    # data in its whole
+    predictions_multiple = predict_sequences_multiple(
+        model,
+        data_x,
+        data_x[0].shape[0],
+        window_size
+    )
+
+    plotting.plot_results_multiple(predictions_multiple, true_values, window_size)
+
 else:
     # Initialize an array of 50 points, since current matplotlib code won't work with dynamic window-sizes. We'll
     # just modify this window inline and re-draw
@@ -122,41 +150,7 @@ else:
         p_changes.pop(0);p_changes.append(p_change)
         t_changes.pop(0);t_changes.append(t_change)
 
-        if p_change >= .05:
-            wallet += holdings
-            holdings = 0
-            print("SELLING!")
-        elif p_change <= -.05:
-            holdings += wallet
-            wallet = 0
-            print("BUYING!")
-            # # auth_client.buy(price='0.01',  # USD
-            # #                 # size='0.01', #BTC
-            # #                 product_id='BTC-USD')
-        holdings += holdings * (.1 * t_change)
-        print('prediction: {} ({}% change); true: {} ({}% change)'.format(prediction, p_change, true, t_change))
-        print('holdings=${} wallet=${}'.format(holdings, wallet))
+        buy_sell(all_predictions[-2:], true_values[-2:], live=True)
 
         plotting.plot_results(p_changes, t_changes)
-        time.sleep(2)
-
-
-if config.flags.multi_window:
-    # Reload the data-generator
-    data_gen_test = dl.generate_clean_data(
-        batch_size=800,
-        start_index=ntrain
-    )
-    data_x, true_values = next(data_gen_test)
-    window_size = 50  # numer of steps to predict into the future
-
-    # We are going to cheat a bit here and just take the next 400 steps from the testing generator and predict that
-    # data in its whole
-    predictions_multiple = predict_sequences_multiple(
-        model,
-        data_x,
-        data_x[0].shape[0],
-        window_size
-    )
-
-    plotting.plot_results_multiple(predictions_multiple, true_values, window_size)
+        time.sleep(5)

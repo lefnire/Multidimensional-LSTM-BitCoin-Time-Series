@@ -2,15 +2,15 @@
     "data": {
         "db_in": "postgres://lefnire:lefnire@localhost:5432/coins2",
         "filename_clean": "data/clean_data.h5",
-        "filter_columns": [],
-        "batch_size": 50,
+        "batch_size": 100,
         "train_test_split": 0.8,
+        "sklearn_normalize": true,
         "x_window_size": 150,
         "y_window_size": 1,
-        "y_predict_column": "b_change_percent"
+        "y_predict_column": "c_ask"
     },
     "model": {
-        "epochs": 100,
+        "epochs": 2,
         "loss_function": "mse",
         "optimiser_function": "Nadam",
         "filename_model": "data/model_saved.h5",
@@ -18,8 +18,6 @@
     },
     "flags": {
         "create_clean_data": false,
-        "train": false,
-        "multi_window": false,
-        "collect": true
+        "train": false
     }
 }

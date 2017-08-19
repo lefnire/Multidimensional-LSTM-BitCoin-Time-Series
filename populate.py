@@ -1,7 +1,7 @@
 import requests, time
 from lstm_btc import conn, config
 
-SLEEP = 5
+SLEEP = 6
 
 
 def create_table_if_not_exists(tablename):

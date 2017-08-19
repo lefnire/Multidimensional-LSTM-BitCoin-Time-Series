@@ -2,12 +2,15 @@ import h5py, requests, time
 import numpy as np
 import pandas as pd
 from sklearn import preprocessing
-from lstm_btc import config, conn
+from lstm_btc import config, conn, conn_btc
 
 
 class ETL:
     """Extract Transform Load class for all data operations pre model inputs. Data is read in generative way to allow
     for large datafiles and low memory utilisation"""
+
+    def __init__(self):
+        self.btc_data = None
 
     def generate_clean_data(self, filename=config.data.filename_clean, batch_size=config.data.batch_size,
                             start_index=0):
@@ -25,8 +28,7 @@ class ETL:
             yield x
 
     def create_clean_datafile(self, batch_size=config.data.batch_size, x_window_size=config.data.x_window_size,
-                              y_window_size=config.data.y_window_size,
-                              filter_cols=config.data.filter_columns, normalize=True):
+                              y_window_size=config.data.y_window_size):
         """Incrementally save a datafile of clean data ready for loading straight into model"""
         print('> Creating x & y data files...')
 
@@ -34,9 +36,7 @@ class ETL:
             batch_size=batch_size,
             x_window_size=x_window_size,
             y_window_size=y_window_size,
-            y_col=config.data.y_predict_column,
-            filter_cols=filter_cols,
-            normalize=normalize
+            y_col=config.data.y_predict_column
         )
 
         i = 0
@@ -63,15 +63,10 @@ class ETL:
 
         print('> Clean datasets created in file `' + config.data.filename_clean)
 
-    def clean_data(self, batch_size, x_window_size, y_window_size, y_col, filter_cols, normalize):
+    def clean_data(self, batch_size, x_window_size, y_window_size, y_col):
         """Cleans and normalizes the data in batches `batch_size` at a time"""
-        data = self.db_to_dataframe(sklearn_normalize=not normalize)
-
-        if filter_cols:
-            # Remove any columns from data that we don't need by getting the difference between cols and filter list
-            rm_cols = set(data.columns) - set(filter_cols)
-            for col in rm_cols:
-                del data[col]
+        # data = self.db_to_dataframe(sklearn_normalize=not normalize)
+        data = self.btc_to_dataframe()
 
         # Convert y-predict column name to numerical index
         y_col = list(data.columns).index(y_col)
@@ -89,7 +84,7 @@ class ETL:
                 i += 1
                 continue
 
-            if normalize: # TODO remove - using scikit-learn processor instead
+            if not config.data.sklearn_normalize:
                 abs_base, x_window_data = self.zero_base_standardise(x_window_data)
                 _, y_window_data = self.zero_base_standardise(y_window_data, abs_base=abs_base)
 
@@ -110,7 +105,7 @@ class ETL:
 
 
     def data_tail(self, x_window_size=config.data.x_window_size,
-                  y_window_size=config.data.y_window_size, normalize=True):
+                  y_window_size=config.data.y_window_size):
         """Returns one batch worth of data (one x-window & y-window)"""
         data = self.db_to_dataframe(tail=True)
         data = data[-(x_window_size + y_window_size):]  # last batch
@@ -121,7 +116,7 @@ class ETL:
         x_window_data = data[:x_window_size]
         y_window_data = data[x_window_size:]
 
-        if normalize:
+        if not config.data.sklearn_normalize:
             abs_base, x_window_data = self.zero_base_standardise(x_window_data)
             _, y_window_data = self.zero_base_standardise(y_window_data, abs_base=abs_base)
 
@@ -146,16 +141,16 @@ class ETL:
         data_normalized = (data - data_min) / (data_max - data_min)
         return (data_min, data_max, data_normalized)
 
-    def db_to_dataframe(self, tail=False, sklearn_normalize=False):
+    def db_to_dataframe(self, tail=False):
         """Fetches all relevant data in database and returns as a Pandas dataframe"""
         query = """
         select
-          a.change_percent a_change_percent, a.volume a_volume,
-          b.change_percent b_change_percent, b.volume b_volume,
-          c.change_percent c_change_percent, c.volume c_volume
+          a.ask a_ask, a.volume a_volume,
+          b.ask b_ask, b.volume b_volume,
+          c.ask c_ask, c.volume c_volume
 
         from (
-          select avg(change_percent) change_percent, avg(volume) volume,
+          select avg(last) as ask, avg(volume) volume,
             date_trunc('second', ts at time zone 'utc') as ts
           from okcoin_btccny
           where ts > now() - interval '1 year'
@@ -163,17 +158,17 @@ class ETL:
         ) a
 
         inner join (
-          select avg(change_percent) change_percent, avg(volume) volume,
+          select avg(last) as ask, avg(volume) volume,
             date_trunc('second', ts at time zone 'utc') as ts
-          from gdax_btcusd
+          from bitstamp_btcusd
           where ts > now() - interval '1 year'
           group by ts
         ) b on a.ts = b.ts
 
         inner join (
-          select avg(change_percent) change_percent, avg(volume) volume,
+          select avg(last) as ask, avg(volume) volume,
             date_trunc('second', ts at time zone 'utc') as ts
-          from kraken_btceur
+          from gdax_btcusd
           where ts > now() - interval '1 year'
           group by ts
         ) c on b.ts = c.ts
@@ -181,10 +176,57 @@ class ETL:
         order by a.ts desc
         """.format('limit 1000' if tail else '')
         df = pd.read_sql_query(query, conn).iloc[::-1] # order by date DESC (for limit to cut right), then reverse again (so LTR)
-        if sklearn_normalize:
+        if config.data.sklearn_normalize:
             scaler = preprocessing.MinMaxScaler()  # StandardScaler(copy=True, with_mean=True, with_std=True)
             scaled = pd.DataFrame(scaler.fit_transform(df))
             scaled.columns = df.columns.values
             return scaled
         else:
+            return df
+
+    def btc_to_dataframe(self):
+        """Fetches all relevant data in database and returns as a Pandas dataframe"""
+        if self.btc_data:
+            return self.btc_data
+        query = """
+        select
+          a.ask a_ask, a.volume a_volume,
+          b.ask b_ask, b.volume b_volume,
+          c.ask c_ask, c.volume c_volume
+
+        from (
+          select avg(price) ask, avg(volume) volume,
+            date_trunc('second', trade_timestamp at time zone 'utc') as ts
+          from norm_okcoincny
+          --where trade_timestamp > now() - interval '1 year'
+          group by ts
+        ) a
+
+        inner join (
+          select avg(ask) ask, avg(volume) volume,
+            date_trunc('second', trade_timestamp at time zone 'utc') as ts
+          from norm_bitstampusd
+          --where trade_timestamp > now() - interval '1 year'
+          group by ts
+        ) b on a.ts = b.ts
+
+        inner join (
+          select avg(ask) ask, avg(volume) volume,
+            date_trunc('second', trade_timestamp at time zone 'utc') as ts
+          from norm_coinbaseusd
+          --where trade_timestamp > now() - interval '1 year'
+          group by ts
+        ) c on b.ts = c.ts
+
+        order by a.ts asc
+        """
+        df = pd.read_sql_query(query, conn_btc)
+        if config.data.sklearn_normalize:
+            scaler = preprocessing.MinMaxScaler()  # StandardScaler(copy=True, with_mean=True, with_std=True)
+            scaled = pd.DataFrame(scaler.fit_transform(df))
+            scaled.columns = df.columns.values
+            self.btc_data = scaled
+            return scaled
+        else:
+            self.btc_data = df
             return df
