@@ -18,6 +18,8 @@ def plot_results(predicted_data, true_data, block=False):
         print('not existing')
         fig = plt.figure(figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k')
         ax = fig.add_subplot(111)
+        ax.set_ylim([-1,1])
+        ax.set_xlim([0,50])
         li_true, = ax.plot(true_data, label='True Data')
         li_pred, = plt.plot(predicted_data, label='Prediction')
         plt.legend()

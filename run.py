@@ -1,6 +1,7 @@
 import os, time, h5py
+import gdax
 import numpy as np
-from lstm_btc import lstm, etl, plotting, config, conn
+from lstm_btc import lstm, etl, plotting, config
 
 tstart = time.time()
 dl = etl.ETL()
@@ -8,6 +9,10 @@ true_values = []
 all_predictions = []
 holdings, wallet = 100, 100
 
+
+def percent_change(new, old):
+    if old == 0: return .0001
+    return (new - old) / old
 
 def predict_sequences_multiple(model, data, window_size, prediction_len):
     # Predict sequence of 50 steps before shifting prediction run forward by 50 steps
@@ -23,27 +28,37 @@ def predict_sequences_multiple(model, data, window_size, prediction_len):
     return prediction_seqs
 
 
-def update_wallet(xs, ys):
+def buy_sell(preds, trues, tail=False, dry_run=True):
     """Running talley of our experiment (how much we'll make)"""
     global wallet, holdings
-    for x, y in zip(xs, ys):
-        x = float(x)
-        if x < 0:
+    for pred, true in zip(preds, trues):
+        if prev == None:
+            prev = pred
+            continue
+        # Just to be clear - this is the anticipated percent change of the change_percent, rather than just change_percent
+        # directly. This is because change_percent is normalized in the data processing, so it's not what it seems
+        perc_change_of_perc_change = percent_change(pred, prev)
+        if perc_change_of_perc_change > .2:
             wallet += holdings
             holdings = 0
-        elif x > 0:
+        elif perc_change_of_perc_change < -.2:
             holdings += wallet
             wallet = 0
-        holdings += holdings*(.1*y)
+            if not dry_run:
+                # Buy 0.01 BTC @ 100 USD
+                print("BUYING!")
+                # auth_client.buy(price='0.01',  # USD
+                #                 # size='0.01', #BTC
+                #                 product_id='BTC-USD')
+        holdings += holdings*(.1*true)
+        prev = pred
     print('holdings=${} wallet=${}'.format(holdings, wallet))
 
-
-dl.ensure_data()
 
 if config.flags.create_clean_data or not os.path.isfile(config.data.filename_clean):
     print('> Generating clean data from:', config.data.filename_clean, 'with batch_size:',
           config.data.batch_size)
-    dl.create_clean_datafile()
+    dl.create_clean_datafile(normalize=False)
 
 if config.flags.train or not os.path.isfile(config.model.filename_model):
     data_gen_train = dl.generate_clean_data()
@@ -81,28 +96,49 @@ if config.flags.train or not os.path.isfile(config.model.filename_model):
         dset_p = hf.create_dataset('predictions', data=predictions)
         dset_y = hf.create_dataset('true_values', data=true_values)
 
-    update_wallet(predictions, true_values)
-    plotting.plot_results(predictions[-800:], true_values[-800:], block=True)
+    buy_sell(predictions, true_values)
+    plotting.plot_results(predictions, true_values, block=True)
 
 else:
     # Initialize an array of 50 points, since current matplotlib code won't work with dynamic window-sizes. We'll
     # just modify this window inline and re-draw
-    true_values = [0] * 50
-    all_predictions = [0] * 50
+    true_values = [0.] * 50
+    all_predictions = [0.] * 50
+    p_changes = [0.] * 50
+    t_changes = [0.] * 50
+    model = lstm.load_network()
 
     while True:
-        dl.fetch_market_and_save()
-        data_gen_test = dl.data_tail()
-        model = lstm.load_network()
+        # Market data will be running in the background (populate.py), so each pass will have new data
+        x, y = dl.data_tail()
 
-        x, y = data_gen_test
-        true_values.pop(0);true_values.append(y)
-        predictions = model.predict_on_batch(x)
-        all_predictions.pop(0);all_predictions.append(predictions[0])
+        true = float(y)
+        true_values.pop(0);true_values.append(true)
+        prediction = float(model.predict_on_batch(x)[0])
+        all_predictions.pop(0);all_predictions.append(prediction)
 
-        update_wallet(predictions, [y])
-        print('prediction:', all_predictions[-1], 'true:', true_values[-1])
-        plotting.plot_results(all_predictions, true_values)
+        p_change = percent_change(prediction, all_predictions[-2])
+        t_change = percent_change(true, true_values[-2])
+        p_changes.pop(0);p_changes.append(p_change)
+        t_changes.pop(0);t_changes.append(t_change)
+
+        if p_change >= .05:
+            wallet += holdings
+            holdings = 0
+            print("SELLING!")
+        elif p_change <= -.05:
+            holdings += wallet
+            wallet = 0
+            print("BUYING!")
+            # # auth_client.buy(price='0.01',  # USD
+            # #                 # size='0.01', #BTC
+            # #                 product_id='BTC-USD')
+        holdings += holdings * (.1 * t_change)
+        print('prediction: {} ({}% change); true: {} ({}% change)'.format(prediction, p_change, true, t_change))
+        print('holdings=${} wallet=${}'.format(holdings, wallet))
+
+        plotting.plot_results(p_changes, t_changes)
+        time.sleep(2)
 
 
 if config.flags.multi_window:

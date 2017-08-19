@@ -1,7 +1,7 @@
 import h5py, requests, time
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn import preprocessing
 from lstm_btc import config, conn
 
 
@@ -26,7 +26,7 @@ class ETL:
 
     def create_clean_datafile(self, batch_size=config.data.batch_size, x_window_size=config.data.x_window_size,
                               y_window_size=config.data.y_window_size,
-                              filter_cols=config.data.filter_columns, normalise=True):
+                              filter_cols=config.data.filter_columns, normalize=True):
         """Incrementally save a datafile of clean data ready for loading straight into model"""
         print('> Creating x & y data files...')
 
@@ -36,7 +36,7 @@ class ETL:
             y_window_size=y_window_size,
             y_col=config.data.y_predict_column,
             filter_cols=filter_cols,
-            normalise=normalise
+            normalize=normalize
         )
 
         i = 0
@@ -61,11 +61,11 @@ class ETL:
                 rcount_y += y_batch.shape[0]
                 i += 1
 
-        print('> Clean datasets created in file `' + config.data.filename_clean + '.h5`')
+        print('> Clean datasets created in file `' + config.data.filename_clean)
 
-    def clean_data(self, batch_size, x_window_size, y_window_size, y_col, filter_cols, normalise):
-        """Cleans and Normalises the data in batches `batch_size` at a time"""
-        data = self.db_to_dataframe()
+    def clean_data(self, batch_size, x_window_size, y_window_size, y_col, filter_cols, normalize):
+        """Cleans and normalizes the data in batches `batch_size` at a time"""
+        data = self.db_to_dataframe(sklearn_normalize=not normalize)
 
         if filter_cols:
             # Remove any columns from data that we don't need by getting the difference between cols and filter list
@@ -89,7 +89,7 @@ class ETL:
                 i += 1
                 continue
 
-            if normalise: # TODO remove - using scikit-learn processor instead
+            if normalize: # TODO remove - using scikit-learn processor instead
                 abs_base, x_window_data = self.zero_base_standardise(x_window_data)
                 _, y_window_data = self.zero_base_standardise(y_window_data, abs_base=abs_base)
 
@@ -110,7 +110,7 @@ class ETL:
 
 
     def data_tail(self, x_window_size=config.data.x_window_size,
-                  y_window_size=config.data.y_window_size, normalise=True):
+                  y_window_size=config.data.y_window_size, normalize=True):
         """Returns one batch worth of data (one x-window & y-window)"""
         data = self.db_to_dataframe(tail=True)
         data = data[-(x_window_size + y_window_size):]  # last batch
@@ -121,7 +121,7 @@ class ETL:
         x_window_data = data[:x_window_size]
         y_window_data = data[x_window_size:]
 
-        if normalise:
+        if normalize:
             abs_base, x_window_data = self.zero_base_standardise(x_window_data)
             _, y_window_data = self.zero_base_standardise(y_window_data, abs_base=abs_base)
 
@@ -139,16 +139,15 @@ class ETL:
         data_standardised = (data / abs_base) - 1
         return (abs_base, data_standardised)
 
-    def min_max_normalise(self, data, data_min=pd.DataFrame(), data_max=pd.DataFrame()):
-        """Normalise a Pandas dataframe using column-wise min-max normalisation (can use custom min, max if desired)"""
+    def min_max_normalize(self, data, data_min=pd.DataFrame(), data_max=pd.DataFrame()):
+        """normalize a Pandas dataframe using column-wise min-max normalisation (can use custom min, max if desired)"""
         if (data_min.empty): data_min = data.min()
         if (data_max.empty): data_max = data.max()
-        data_normalised = (data - data_min) / (data_max - data_min)
-        return (data_min, data_max, data_normalised)
+        data_normalized = (data - data_min) / (data_max - data_min)
+        return (data_min, data_max, data_normalized)
 
-    def db_to_dataframe(self, tail=False):
+    def db_to_dataframe(self, tail=False, sklearn_normalize=False):
         """Fetches all relevant data in database and returns as a Pandas dataframe"""
-        # TODO offset Chinese by timezone difference
         query = """
         select
           a.change_percent a_change_percent, a.volume a_volume,
@@ -180,79 +179,12 @@ class ETL:
         ) c on b.ts = c.ts
 
         order by a.ts desc
-        {}
         """.format('limit 1000' if tail else '')
         df = pd.read_sql_query(query, conn).iloc[::-1] # order by date DESC (for limit to cut right), then reverse again (so LTR)
-        return df
-        scaler = StandardScaler()  # StandardScaler(copy=True, with_mean=True, with_std=True)
-        scaled = pd.DataFrame(scaler.fit_transform(df))
-        scaled.columns = df.columns.values
-        return scaled
-        # df.to_csv('full.csv', index=False)
-
-    def fetch_market_and_save(self):
-        """Fetches the most recent market-summaries snapshot and saves to the database. Returns the JSON result from
-        the fetch operation.
-        """
-        # TODO only fetch salient info (instead of full market-summaries) to pare down on server-side CPU and increase
-        # allowance. See https://cryptowat.ch/docs/api#rate-limit. Or find alternative source with higher rate-limit
-        res = requests.get('https://api.cryptowat.ch/markets/summaries').json()['result']
-        query = ""
-        for key, val in res.items():
-            tablename = self._clean_tablename(key)
-            self._create_table_if_not_exists(tablename)
-            # TODO sanitize via conn.execute(text(query), :a=a, :b=b)
-            query += """
-            INSERT INTO {name} (last, high, low, change_percent, change_absolute, volume)
-            VALUES ({last}, {high}, {low}, {change_percent}, {change_absolute}, {volume});
-            """.format(
-                name=tablename,
-
-                last=val['price']['last'],
-                high=val['price']['high'],
-                low=val['price']['low'],
-                change_percent=val['price']['change']['percentage'],
-                change_absolute=val['price']['change']['absolute'],
-                volume=val['volume']
-            )
-        conn.execute(query)
-        return res
-
-    @staticmethod
-    def _create_table_if_not_exists(tablename):
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS {name}(
-          id SERIAL PRIMARY KEY,
-          last DOUBLE PRECISION,
-          high DOUBLE PRECISION,
-          low DOUBLE PRECISION,
-          change_percent DOUBLE PRECISION,
-          change_absolute DOUBLE PRECISION,
-          volume DOUBLE PRECISION, 
-          ts TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS {name}_ts_idx ON {name} (ts);
-        """.format(name=tablename))
-
-    @staticmethod
-    def _clean_tablename(tablename):
-        return tablename.replace(':', '_').replace('-', '_')
-
-    @staticmethod
-    def gdax_ct():
-        return conn.execute("select count(*) from gdax_btcusd").fetchone().count
-
-    def ensure_data(self):
-        """Ensure enough data is in the database to work with"""
-        try:
-            assert self.gdax_ct() > 1000
-        except Exception:
-            print('> Missing or not enough data, collecting now from cryptowatch...')
-            self.fetch_market_and_save()  # ensure db structure
-            i = 0
-            while True:
-                time.sleep(1)
-                self.fetch_market_and_save()
-                i += 1
-                if i % 100 == 0 and ETL.gdax_ct() > 1000:
-                    break
+        if sklearn_normalize:
+            scaler = preprocessing.MinMaxScaler()  # StandardScaler(copy=True, with_mean=True, with_std=True)
+            scaled = pd.DataFrame(scaler.fit_transform(df))
+            scaled.columns = df.columns.values
+            return scaled
+        else:
+            return df
